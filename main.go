@@ -9,8 +9,8 @@ import (
 	"github.com/nsf/termbox-go"
 )
 
+// Default settings
 const (
-	// FPS_LIMIT = 60
 	HEIGHT = 20
 	WIDTH  = 80
 	LAND   = '.'
@@ -18,18 +18,35 @@ const (
 	FOOD   = 'O'
 )
 
+// Colors
+const (
+	FOOD_COLOR  = termbox.ColorRed
+	SNAKE_COLOR = termbox.ColorGreen
+	LAND_COLOR  = termbox.ColorYellow
+	FOREGROUND  = termbox.ColorWhite
+	BACKGROUND  = termbox.ColorBlack
+)
+
 type Game struct {
 	Access              sync.Mutex
-	Land                [][]byte
+	Land                *Land
 	Snake               Snake
 	Food                Food
 	KeyChannel          chan termbox.Key
 	SystemSignalChannel chan termbox.Key
 }
 
+type Land struct {
+	Cells  [][]byte
+	Color  termbox.Attribute
+	Height int
+	Width  int
+}
+
 type Snake struct {
 	Head          *Part
 	Tail          *Part
+	Color         termbox.Attribute
 	MoveDirection termbox.Key
 	Length        int
 	State         chan struct{}
@@ -42,6 +59,7 @@ type Part struct {
 
 type Food struct {
 	Position []int
+	Color    termbox.Attribute
 	State    chan struct{}
 }
 
@@ -54,13 +72,14 @@ func CreateGame() *Game {
 
 // Snake
 func (g *Game) SpawnSnake() {
-	h, w := HEIGHT/2, WIDTH/2
-	g.Land[h][w] = SNAKE
+	h, w := g.Land.Height/2, g.Land.Width/2
+	g.Land.Cells[h][w] = SNAKE
 	newPart := &Part{
 		Position: []int{h, w},
 	}
 	g.Snake.Head = newPart
 	g.Snake.Tail = newPart
+	g.Snake.Color = SNAKE_COLOR
 	g.Snake.MoveDirection = termbox.KeyArrowRight
 	g.Snake.State = make(chan struct{})
 }
@@ -128,14 +147,14 @@ func (g *Game) MovePart(direction termbox.Key) {
 		x++
 	}
 
-	if x == -1 || x == HEIGHT || y == -1 || y == WIDTH || g.CheckForBodyCollision(x, y) {
+	if x == -1 || x == g.Land.Height || y == -1 || y == g.Land.Width || g.CheckForBodyCollision(x, y) {
 		g.SystemSignalChannel <- termbox.KeyEsc
 		return
 	}
 
 	for cur != nil {
-		g.Land[cur.Position[0]][cur.Position[1]] = LAND
-		g.Land[x][y] = SNAKE
+		g.Land.Cells[cur.Position[0]][cur.Position[1]] = LAND
+		g.Land.Cells[x][y] = SNAKE
 		x, y, cur.Position[0], cur.Position[1] = cur.Position[0], cur.Position[1], x, y
 
 		cur = cur.Next
@@ -158,8 +177,9 @@ func (g *Game) CheckForBodyCollision(x, y int) bool {
 
 // Food
 func (g *Game) InitSpawnFood() {
-	h, w := rand.Intn(HEIGHT), rand.Intn(WIDTH)
-	g.Land[h][w] = FOOD
+	h, w := rand.Intn(g.Land.Height), rand.Intn(g.Land.Width)
+	g.Land.Cells[h][w] = FOOD
+	g.Food.Color = FOOD_COLOR
 	g.Food.Position = []int{h, w}
 	g.Food.State = make(chan struct{})
 }
@@ -172,10 +192,10 @@ func (g *Game) WatchFood() {
 }
 
 func (g *Game) SpawnFood() {
-	h, w := rand.Intn(HEIGHT), rand.Intn(WIDTH)
+	h, w := rand.Intn(g.Land.Height), rand.Intn(g.Land.Width)
 	if h != g.Snake.Head.Position[0] && w != g.Snake.Head.Position[1] {
 		g.Access.Lock()
-		g.Land[h][w] = FOOD
+		g.Land.Cells[h][w] = FOOD
 		g.Food.Position = []int{h, w}
 		g.Access.Unlock()
 	} else {
@@ -205,9 +225,18 @@ func (g *Game) Render() {
 			}
 		}
 
-		for x, row := range g.Land {
+		for x, row := range g.Land.Cells {
 			for y, cell := range row {
-				termbox.SetCell(y, x, rune(cell), termbox.ColorWhite, termbox.ColorBlack)
+				fg, bg := FOREGROUND, BACKGROUND
+				switch cell {
+				case FOOD:
+					fg = g.Food.Color
+				case SNAKE:
+					fg = g.Snake.Color
+				case LAND:
+					fg = g.Land.Color
+				}
+				termbox.SetCell(y, x, rune(cell), fg, bg)
 			}
 		}
 		termbox.Flush()
@@ -256,13 +285,19 @@ func main() {
 	game.Run()
 }
 
-func CreateLand() [][]byte {
-	land := make([][]byte, HEIGHT)
-	for h := 0; h < HEIGHT; h++ {
-		land[h] = make([]byte, WIDTH)
-		for w := 0; w < WIDTH; w++ {
+func CreateLand() *Land {
+	height, width := HEIGHT, WIDTH
+	land := make([][]byte, height)
+	for h := 0; h < height; h++ {
+		land[h] = make([]byte, width)
+		for w := 0; w < width; w++ {
 			land[h][w] = LAND
 		}
 	}
-	return land
+	return &Land{
+		Cells:  land,
+		Color:  LAND_COLOR,
+		Height: height,
+		Width:  width,
+	}
 }
