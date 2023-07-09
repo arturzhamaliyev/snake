@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/eiannone/keyboard"
@@ -15,11 +16,15 @@ import (
 
 const (
 	// FPS_LIMIT = 60
-	HEIGHT     = 20
-	WIDTH      = 80
-	LAND       = '.'
-	SNAKE      = 'S'
-	FOOD       = 'O'
+	HEIGHT = 20
+	WIDTH  = 80
+	LAND   = '.'
+	SNAKE  = 'S'
+	FOOD   = 'O'
+)
+
+// Directions
+const (
 	LEFT_MOVE  = "a"
 	UP_MOVE    = "w"
 	RIGHT_MOVE = "d"
@@ -27,38 +32,198 @@ const (
 )
 
 type Game struct {
-	Access        sync.Mutex
-	Land          [][]byte
-	SnakePosition []int
-	FoodPosition  []int
-	KeyChannel    chan string
+	Access sync.Mutex
+	Land   [][]byte
+	Snake  Snake
+	Food   Food
+	// State      chan struct{}
+	KeyChannel          chan string
+	SystemSignalChannel chan os.Signal
+}
+
+type Snake struct {
+	Head          *Part
+	Tail          *Part
+	MoveDirection string
+	Length        int
+	State         chan struct{}
+}
+
+type Part struct {
+	Position []int
+	Next     *Part
+}
+
+type Food struct {
+	Position []int
+	State    chan struct{}
 }
 
 func CreateGame() *Game {
 	return &Game{
-		Land:       CreateLand(),
+		Land: CreateLand(),
+		// State:      make(chan struct{}),
 		KeyChannel: make(chan string),
 	}
 }
 
+// Snake
 func (g *Game) SpawnSnake() {
 	h, w := HEIGHT/2, WIDTH/2
 	g.Land[h][w] = SNAKE
-	g.SnakePosition = []int{h, w}
+	newPart := &Part{
+		Position: []int{h, w},
+	}
+	g.Snake.Head = newPart
+	g.Snake.Tail = newPart
+	g.Snake.MoveDirection = RIGHT_MOVE
+	g.Snake.State = make(chan struct{})
+}
+
+func (g *Game) WatchSnake() {
+	for {
+		<-g.Snake.State
+		g.GrowSnake()
+	}
+}
+
+func (g *Game) GrowSnake() {
+	g.Snake.Length++
+	x, y := g.Snake.Tail.Position[0], g.Snake.Tail.Position[1]
+	switch g.Snake.MoveDirection {
+	case LEFT_MOVE:
+		y++
+
+	case UP_MOVE:
+		x++
+
+	case RIGHT_MOVE:
+		y--
+
+	case DOWN_MOVE:
+		x--
+	}
+
+	newPart := &Part{
+		Position: []int{x, y},
+	}
+
+	g.Access.Lock()
+	defer g.Access.Unlock()
+
+	g.Snake.Tail.Next = newPart
+	g.Snake.Tail = g.Snake.Tail.Next
+}
+
+func (g *Game) MoveSnake(direction string) {
+	if (direction == LEFT_MOVE && g.Snake.MoveDirection != RIGHT_MOVE) ||
+		(direction == RIGHT_MOVE && g.Snake.MoveDirection != LEFT_MOVE) ||
+		(direction == UP_MOVE && g.Snake.MoveDirection != DOWN_MOVE) ||
+		(direction == DOWN_MOVE && g.Snake.MoveDirection != UP_MOVE) {
+		g.Snake.MoveDirection = direction
+	}
+
+	g.Access.Lock()
+	g.MovePart(g.Snake.MoveDirection)
+	g.Access.Unlock()
+}
+
+func (g *Game) MovePart(direction string) {
+	cur := g.Snake.Head
+
+	x, y := cur.Position[0], cur.Position[1]
+	switch direction {
+	case LEFT_MOVE:
+		y--
+	case UP_MOVE:
+		x--
+	case RIGHT_MOVE:
+		y++
+	case DOWN_MOVE:
+		x++
+	}
+
+	if x == -1 || x == HEIGHT || y == -1 || y == WIDTH || g.CheckForBodyCollision(x, y) {
+		g.SystemSignalChannel <- syscall.SIGINT
+		return
+	}
+
+	for cur != nil {
+		g.Land[cur.Position[0]][cur.Position[1]] = LAND
+		g.Land[x][y] = SNAKE
+		x, y, cur.Position[0], cur.Position[1] = cur.Position[0], cur.Position[1], x, y
+
+		cur = cur.Next
+	}
+}
+
+func (g *Game) CheckForBodyCollision(x, y int) bool {
+	cur := g.Snake.Head
+
+	for cur != nil {
+		if cur.Position[0] == x && cur.Position[1] == y {
+			return true
+		}
+
+		cur = cur.Next
+	}
+
+	return false
+}
+
+// Food
+func (g *Game) InitSpawnFood() {
+	h, w := rand.Intn(HEIGHT), rand.Intn(WIDTH)
+	g.Land[h][w] = FOOD
+	g.Food.Position = []int{h, w}
+	g.Food.State = make(chan struct{})
+}
+
+func (g *Game) WatchFood() {
+	for {
+		<-g.Food.State
+		g.SpawnFood()
+	}
 }
 
 func (g *Game) SpawnFood() {
 	h, w := rand.Intn(HEIGHT), rand.Intn(WIDTH)
-	g.Land[h][w] = FOOD
-	g.FoodPosition = []int{h, w}
+	if h != g.Snake.Head.Position[0] && w != g.Snake.Head.Position[1] {
+		g.Access.Lock()
+		g.Land[h][w] = FOOD
+		g.Food.Position = []int{h, w}
+		g.Access.Unlock()
+	} else {
+		g.SpawnFood()
+	}
 }
 
+// Game staff
 func (g *Game) Render() {
 	buf := new(bytes.Buffer)
-	for range time.Tick(100 * time.Millisecond) { // FPS
+	for range time.Tick(200 * time.Millisecond) { // FPS
 		cmd := exec.Command("cmd", "/c", "cls")
 		cmd.Stdout = os.Stdout
 		cmd.Run()
+
+		// initially snake moves right direction
+		{
+			select {
+			case direction := <-g.KeyChannel:
+				g.MoveSnake(direction)
+
+			default:
+				g.MoveSnake(g.Snake.MoveDirection)
+			}
+		}
+
+		// checking	food state
+		{
+			if g.Snake.Head.Position[0] == g.Food.Position[0] && g.Snake.Head.Position[1] == g.Food.Position[1] {
+				g.Food.State <- struct{}{}
+				g.Snake.State <- struct{}{}
+			}
+		}
 
 		for _, h := range g.Land {
 			for _, w := range h {
@@ -90,38 +255,10 @@ func (g *Game) ListenInputs() {
 	}
 }
 
-func (g *Game) MoveSnake() {
-	moveDirection := func(direction string) {
-		// TODO: find the way to deal with inputs
-	}
-
-	for {
-		move := <-g.KeyChannel
-		// g.Access.Lock()
-		// g.Land[g.SnakePosition[0]][g.SnakePosition[1]] = LAND
-		switch move {
-		case LEFT_MOVE:
-			// g.SnakePosition[1]--
-			go moveDirection(LEFT_MOVE)
-		case UP_MOVE:
-			// g.SnakePosition[0]--
-			go moveDirection(UP_MOVE)
-		case RIGHT_MOVE:
-			// g.SnakePosition[1]++
-			go moveDirection(RIGHT_MOVE)
-		case DOWN_MOVE:
-			// g.SnakePosition[0]++
-			go moveDirection(DOWN_MOVE)
-		}
-		// g.Land[g.SnakePosition[0]][g.SnakePosition[1]] = SNAKE
-		// g.Access.Unlock()
-	}
-}
-
 func (g *Game) Run() {
-	s := make(chan os.Signal, 1)
-	signal.Notify(s, os.Interrupt)
-	<-s
+	g.SystemSignalChannel = make(chan os.Signal, 1)
+	signal.Notify(g.SystemSignalChannel, os.Interrupt)
+	<-g.SystemSignalChannel
 
 	fmt.Println("Game Over!")
 }
@@ -129,12 +266,12 @@ func (g *Game) Run() {
 func main() {
 	game := CreateGame()
 	game.SpawnSnake()
-	game.SpawnFood()
+	game.InitSpawnFood()
 
 	go game.Render()
 	go game.ListenInputs()
-	go game.MoveSnake()
-	// go game.WatchSnake()
+	go game.WatchSnake()
+	go game.WatchFood()
 
 	game.Run()
 }
