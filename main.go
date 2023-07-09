@@ -81,6 +81,7 @@ func (g *Game) SpawnSnake() {
 	g.Snake.Tail = newPart
 	g.Snake.Color = SNAKE_COLOR
 	g.Snake.MoveDirection = termbox.KeyArrowRight
+	g.Snake.Length = 1
 	g.Snake.State = make(chan struct{})
 }
 
@@ -264,14 +265,11 @@ func (g *Game) Run() {
 }
 
 func main() {
-	defer fmt.Println("Game Over!")
-
 	if err := termbox.Init(); err != nil {
 		panic(err)
 	}
 	termbox.SetInputMode(termbox.InputEsc)
 	termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
-	defer termbox.Close()
 
 	game := CreateGame()
 	game.SpawnSnake()
@@ -283,6 +281,9 @@ func main() {
 	go game.WatchFood()
 
 	game.Run()
+
+	termbox.Close()
+	fmt.Printf("Game Over!\nYour score: %d\n", game.Snake.Length)
 }
 
 func CreateLand() *Land {
