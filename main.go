@@ -1,17 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"math/rand"
-	"os"
-	"os/exec"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/eiannone/keyboard"
+	"github.com/nsf/termbox-go"
 )
 
 const (
@@ -23,28 +18,19 @@ const (
 	FOOD   = 'O'
 )
 
-// Directions
-const (
-	LEFT_MOVE  = "a"
-	UP_MOVE    = "w"
-	RIGHT_MOVE = "d"
-	DOWN_MOVE  = "s"
-)
-
 type Game struct {
-	Access sync.Mutex
-	Land   [][]byte
-	Snake  Snake
-	Food   Food
-	// State      chan struct{}
-	KeyChannel          chan string
-	SystemSignalChannel chan os.Signal
+	Access              sync.Mutex
+	Land                [][]byte
+	Snake               Snake
+	Food                Food
+	KeyChannel          chan termbox.Key
+	SystemSignalChannel chan termbox.Key
 }
 
 type Snake struct {
 	Head          *Part
 	Tail          *Part
-	MoveDirection string
+	MoveDirection termbox.Key
 	Length        int
 	State         chan struct{}
 }
@@ -61,9 +47,8 @@ type Food struct {
 
 func CreateGame() *Game {
 	return &Game{
-		Land: CreateLand(),
-		// State:      make(chan struct{}),
-		KeyChannel: make(chan string),
+		Land:       CreateLand(),
+		KeyChannel: make(chan termbox.Key),
 	}
 }
 
@@ -76,7 +61,7 @@ func (g *Game) SpawnSnake() {
 	}
 	g.Snake.Head = newPart
 	g.Snake.Tail = newPart
-	g.Snake.MoveDirection = RIGHT_MOVE
+	g.Snake.MoveDirection = termbox.KeyArrowRight
 	g.Snake.State = make(chan struct{})
 }
 
@@ -91,16 +76,16 @@ func (g *Game) GrowSnake() {
 	g.Snake.Length++
 	x, y := g.Snake.Tail.Position[0], g.Snake.Tail.Position[1]
 	switch g.Snake.MoveDirection {
-	case LEFT_MOVE:
+	case termbox.KeyArrowLeft:
 		y++
 
-	case UP_MOVE:
+	case termbox.KeyArrowUp:
 		x++
 
-	case RIGHT_MOVE:
+	case termbox.KeyArrowRight:
 		y--
 
-	case DOWN_MOVE:
+	case termbox.KeyArrowDown:
 		x--
 	}
 
@@ -115,11 +100,11 @@ func (g *Game) GrowSnake() {
 	g.Snake.Tail = g.Snake.Tail.Next
 }
 
-func (g *Game) MoveSnake(direction string) {
-	if (direction == LEFT_MOVE && g.Snake.MoveDirection != RIGHT_MOVE) ||
-		(direction == RIGHT_MOVE && g.Snake.MoveDirection != LEFT_MOVE) ||
-		(direction == UP_MOVE && g.Snake.MoveDirection != DOWN_MOVE) ||
-		(direction == DOWN_MOVE && g.Snake.MoveDirection != UP_MOVE) {
+func (g *Game) MoveSnake(direction termbox.Key) {
+	if (direction == termbox.KeyArrowLeft && g.Snake.MoveDirection != termbox.KeyArrowRight) ||
+		(direction == termbox.KeyArrowRight && g.Snake.MoveDirection != termbox.KeyArrowLeft) ||
+		(direction == termbox.KeyArrowUp && g.Snake.MoveDirection != termbox.KeyArrowDown) ||
+		(direction == termbox.KeyArrowDown && g.Snake.MoveDirection != termbox.KeyArrowUp) {
 		g.Snake.MoveDirection = direction
 	}
 
@@ -128,23 +113,23 @@ func (g *Game) MoveSnake(direction string) {
 	g.Access.Unlock()
 }
 
-func (g *Game) MovePart(direction string) {
+func (g *Game) MovePart(direction termbox.Key) {
 	cur := g.Snake.Head
 
 	x, y := cur.Position[0], cur.Position[1]
 	switch direction {
-	case LEFT_MOVE:
+	case termbox.KeyArrowLeft:
 		y--
-	case UP_MOVE:
+	case termbox.KeyArrowUp:
 		x--
-	case RIGHT_MOVE:
+	case termbox.KeyArrowRight:
 		y++
-	case DOWN_MOVE:
+	case termbox.KeyArrowDown:
 		x++
 	}
 
 	if x == -1 || x == HEIGHT || y == -1 || y == WIDTH || g.CheckForBodyCollision(x, y) {
-		g.SystemSignalChannel <- syscall.SIGINT
+		g.SystemSignalChannel <- termbox.KeyEsc
 		return
 	}
 
@@ -200,12 +185,7 @@ func (g *Game) SpawnFood() {
 
 // Game staff
 func (g *Game) Render() {
-	buf := new(bytes.Buffer)
-	for range time.Tick(200 * time.Millisecond) { // FPS
-		cmd := exec.Command("cmd", "/c", "cls")
-		cmd.Stdout = os.Stdout
-		cmd.Run()
-
+	for range time.Tick(60 * time.Millisecond) { // FPS
 		// initially snake moves right direction
 		{
 			select {
@@ -225,45 +205,45 @@ func (g *Game) Render() {
 			}
 		}
 
-		for _, h := range g.Land {
-			for _, w := range h {
-				buf.WriteString(string(w))
+		for x, row := range g.Land {
+			for y, cell := range row {
+				termbox.SetCell(y, x, rune(cell), termbox.ColorWhite, termbox.ColorBlack)
 			}
-			buf.WriteString("\n")
 		}
-		buf.WriteTo(os.Stdout)
+		termbox.Flush()
 	}
 }
 
 func (g *Game) ListenInputs() {
-	if err := keyboard.Open(); err != nil {
-		panic(err)
-	}
-	defer keyboard.Close()
-
 	for {
-		ch, key, err := keyboard.GetKey()
-		if err != nil {
-			continue
-		}
+		event := termbox.PollEvent()
+		switch event.Type {
+		case termbox.EventKey:
+			if event.Key == termbox.KeyEsc || event.Key == termbox.KeyCtrlC {
+				g.SystemSignalChannel <- event.Key
+				return
+			}
 
-		g.KeyChannel <- string(ch)
-
-		if key == keyboard.KeyCtrlC {
-			break
+			g.KeyChannel <- event.Key
 		}
 	}
 }
 
 func (g *Game) Run() {
-	g.SystemSignalChannel = make(chan os.Signal, 1)
-	signal.Notify(g.SystemSignalChannel, os.Interrupt)
+	g.SystemSignalChannel = make(chan termbox.Key, 1)
 	<-g.SystemSignalChannel
-
-	fmt.Println("Game Over!")
 }
 
 func main() {
+	defer fmt.Println("Game Over!")
+
+	if err := termbox.Init(); err != nil {
+		panic(err)
+	}
+	termbox.SetInputMode(termbox.InputEsc)
+	termbox.Clear(termbox.ColorDefault, termbox.ColorDefault)
+	defer termbox.Close()
+
 	game := CreateGame()
 	game.SpawnSnake()
 	game.InitSpawnFood()
